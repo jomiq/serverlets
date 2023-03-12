@@ -6,6 +6,8 @@ name = "pypi"
 [packages]
 paho-mqtt = "*"
 pyshark = "*"
+pyngrok = "*"
+random-word = "*"
 
 [dev-packages]
 

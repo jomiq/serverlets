@@ -6,9 +6,12 @@ import paho.mqtt as mqtt
 import json
 
     
-class Client(paho.Client):
+class MQTTListener(paho.Client):
+    """A listener for doing tasks like awaiting a message,
+        Can be extended to run more extensive state machines
+    """
 
-    topics = []    
+    topics = []
     result = []
     userdata = None
     N = 1
@@ -20,6 +23,8 @@ class Client(paho.Client):
     abort_func = None
     url = ""
 
+    blocking = False
+    userdata = None
     
 
     def __init__(self, url, user, password):
@@ -32,15 +37,17 @@ class Client(paho.Client):
         self.on_subscribe = on_subscribe
         self.on_message = on_message
 
-
-    def run(self, topics: list, timeout=None, accept=None, abort=None, userdata=None, blocking=False):
+    def setup(self, topics: list=[], timeout=None, accept_func=None, abort_func=None, userdata=None, blocking=False):
         self.topics = topics
-        self.result = []
+        self.timeout = timeout
+        self.accept_func = accept_func
+        self.abort_func = abort_func
         self.userdata = userdata
+        self.blocking = blocking
+    
 
-        self.accept_func = accept
-        self.abort_func = abort
-
+    def run(self):
+        self.result = []
         if not self.is_connected():
             self.subscribed = 0
             self.connect(self.url, 8883)
@@ -49,18 +56,17 @@ class Client(paho.Client):
         while self.subscribed < len(self.topics):
             self.loop()
 
-        if timeout != None:
-            self.end_time = dt.datetime.now() + dt.timedelta(seconds=timeout)
+        if self.timeout != None:
+            self.end_time = dt.datetime.now() + dt.timedelta(seconds=self.timeout)
         else:
             self.end_time = None
 
-        print("starting")
+        print("Starting")
         self.loop_start()
-        if blocking:
+        if self.blocking:
             self.wait()
             
     def wait(self):
-        print(self.end_time)
         while self.is_connected():
             t_sleep = 0.1
             if self.end_time != None:
@@ -71,74 +77,72 @@ class Client(paho.Client):
                 t_sleep = max(0, min(t_sleep, t.total_seconds()))
 
             sleep(t_sleep)
-        self.loop_stop()
 
-def on_connect(client: Client, userdata, flags, rc, _properties):
-    print("CONNACK received with code %s." % rc)
+def on_disconnect(client: MQTTListener, _userdata, rc, _properties):
+    print(f"DISCONNECT received with code  {rc}.")
+    client.loop_stop()
+
+def on_connect(client: MQTTListener, userdata, flags, rc, _properties):
+    print(f"CONNACK received with code {rc}.")
     for t in client.topics:
         client.subscribe(t, 1)
 
-def on_subscribe(client: Client, userdata, mid, granted_qos, _properties):
+def on_subscribe(client: MQTTListener, userdata, mid, granted_qos, _properties):
     v = granted_qos[0].value < 4
     if v < 4:
         client.subscribed += 1
     else:
-        raise Exception(f"Failed subscription {granted_qos[0].names[v]}")
+        raise Exception(f"Failed subscription {mid}: {granted_qos[0].names[v]}")
 
-def on_message(client: Client, userdata, msg):
+
+def on_message(client: MQTTListener, userdata, msg):
     print(msg.topic + " " + str(msg.qos) + " " + str(msg.payload, "utf-8"))
     try:
-        if client.abort_func:
+        if client.abort_func != None:
             client.abort_func(client, msg)
-        if client.accept_func:
+        if client.accept_func != None:
             client.accept_func(client, msg)
     except Exception as e:
         print(e)
         client.status = e
         client.disconnect()
 
-
-
-def acc_all(client: Client, msg):
+    
+def acc_all(client: MQTTListener, msg):
     client.result.append(msg)
     raise Exception("done")
 
-def abort_none(client: Client, msg):
+def abort_none(client: MQTTListener, msg):
     pass
 
-def accept_bacon(client: Client, msg):
+def accept_bacon(client: MQTTListener, msg):
     if msg.topic == "info" and str(msg.payload, "utf-8") == "bacon":
         client.result.append(str(msg.payload, "utf-8"))
         if len(client.result) >= client.userdata.N:
             raise Exception("done")
 
-def abort_chicken(client: Client, msg):
+def abort_chicken(client: MQTTListener, msg):
     if msg.topic == "control" and str(msg.payload, "utf-8") == "chicken":
         raise Exception(f"{client.userdata.msg} reason: chicken")
 
+
 if __name__ == "__main__":
     from collections import namedtuple
+    from credentials import CRED
     Data = namedtuple("Data", ["N", "msg"])
 
-    URL = None
-    with open("mqtt.json", "r") as f:
-        URL = json.load(f)["url"]
-
-    secrets = None
-    with open("secrets.json", "r") as f:
-        secrets = json.load(f)
-
-    bork = Client(URL, secrets["user"], secrets["password"])
+    ms = CRED["mqtt"]
+    bork = MQTTListener(url=ms["url"], user=ms["user"], password=ms["password"])
 
     data = Data(3, "I'm outta here...")
-    bork.run(["control", "info"], 
-                accept=accept_bacon,
-                abort=abort_chicken, 
+    bork.setup(["control", "info"], 
+                accept_func=accept_bacon,
+                abort_func=abort_chicken, 
                 userdata=data,
                 timeout=10.0,
                 blocking=False
                 )
-
+    bork.run()
     bork.wait()
 
     print(bork.result)
@@ -146,7 +150,8 @@ if __name__ == "__main__":
 
     print("re-entrant: ")
 
-    bork.run(["info"], timeout=5.0)
+    bork.setup(["info"], timeout=5.0)
+    bork.run()
     bork.wait()
 
     print(bork.result)
